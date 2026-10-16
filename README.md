@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # libgcxx
 
 A single-header C++11 **conservative, generational, mark-sweep garbage collector**.
@@ -320,3 +321,6 @@ Compile as C++11 or later, and link the platform thread library (`-pthread` on P
 ## License
 
 MIT. See [LICENSE](LICENSE).
+=======
+A high performce garbage-collection library for C++
+>>>>>>> ab9d0344d01b8177578e67d852ed20fdb47e7f39

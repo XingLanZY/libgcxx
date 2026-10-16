@@ -230,7 +230,7 @@
  * ### Why NetBSD / OpenBSD / DragonFly are out of support scope
  *
  * **They cannot get the roots**, and that is not a problem "a little less testing" can wave through:
- *   * `GCXX_PLATFORM_HAVE_LINK_H` is 1 only for Linux / FreeBSD / Android( -- ),
+ *   * `GCXX_PLATFORM_HAVE_LINK_H` is 1 only for Linux / FreeBSD / Android(~1),
  *     so on those three **both the static-root symbol branch and the dynamic-root branch are compiled out**;
  *   * => an object referenced only by a global/static variable is reclaimed as unreachable => **dangling pointer**.
  *
@@ -594,7 +594,7 @@ constexpr unsigned DEBT_CAP_MAPPED_PERCENT = 400;
  * Measured (same workload, ns/op, base = this value at 256):
  *   256 -> 29.5 | 1024 -> 23.9 | 4096 -> 21.9 | 16384 -> 21.6 | 65536 -> 21.5
  * 4096 was chosen because **the gain has already plateaued** (going higher adds only 1.5%) while **the worst-case pause of a single allocation** stays small:
- * one slice of 128 objects x ~8ns -- *1us**; `gc_pace`'s `do/while` runs at most 4 slices => ~4us worst case.
+ * one slice of 128 objects x ~8ns -- **1us**; `gc_pace`'s `do/while` runs at most 4 slices => ~4us worst case.
  * Control: this library's STW pause is **on the millisecond scale** (the `pause` benchmark p50 ~= ms), so 1~4us changes
  * no conclusion about orders of magnitude of latency. **Changing this value means looking at both allocation throughput and the `pause` basis**.
  * @note Wrapped in `#ifndef`, so `-DGCXX_SLICE_BYTES=N` can be used for A/B ablation (like the other switches).
@@ -636,7 +636,7 @@ constexpr unsigned BYTES_PER_WORK_UNIT = 32;
  */
 constexpr unsigned SWEEP_UNITS = (SLICE_BYTES / BYTES_PER_WORK_UNIT);
 /** @brief The batch size at which the sweep side accumulates dead slots before publishing them (see gc_chunk::dead_head).
- * One batch = one CAS + one live decrement, so bigger is cheaper; but the slots in a batch are temporarily invisible to the owner, and too large a batch makes the owner ask for new memory early. 32 is the compromise between "atomic operations saved" and "at most 32 slots invisible" (a 64KB block has thousands of slots; 32 slots  -- KB).
+ * One batch = one CAS + one live decrement, so bigger is cheaper; but the slots in a batch are temporarily invisible to the owner, and too large a batch makes the owner ask for new memory early. 32 is the compromise between "atomic operations saved" and "at most 32 slots invisible" (a 64KB block has thousands of slots; 32 slots ~2KB).
  * @internal
  */
 constexpr unsigned FREE_BATCH = 32u;
@@ -1257,7 +1257,7 @@ struct gc_chunk {
     /* The reciprocal of "divide by slot size" precomputed from slot_size (Granlund-Montgomery): the free path must derive the slot
      * index from the object address (once per dead object swept), and using (uint32_t)(((uint64_t)off * recip) >> 32) instead of a division leaves only imul+shr. @note **Exactness**: with r = floor(2^32/d) + 1 and e = r*d - 2^32 (0 < e <= d),
      * floor(off*r / 2^32) == floor(off/d) holds for all off < 2^32/e. Here d <= MEDIUM_MAX_TOTAL
-     * ( -- KB), so the threshold is >= 2^32/32784  -- 31000; and off is necessarily < 65536 (the object and the chunk base are in the same 64KB block, which chunk_free's cache criterion already guarantees). So it is **an identity across the value range**, not an approximation. */
+     * (~2KB), so the threshold is >= 2^32/32784 ~131000; and off is necessarily < 65536 (the object and the chunk base are in the same 64KB block, which chunk_free's cache criterion already guarantees). So it is **an identity across the value range**, not an approximation. */
     std::uint32_t  recip{};
     std::uint32_t  capacity{};   /**< number of slots (1 for a large object) */
     /* ---- allocation side: **owner-private**, zero atomics on the hot path (mimalloc's page->free / page->used counterpart) ----
@@ -1801,12 +1801,12 @@ struct gc_state {
     /**
      * "this cycle is being cancelled and the color rollback may already have walked the object lists". See the **cross-cycle guard** at the end of object_new.
      *
-     * Why it is needed: the cancellation path is ordered `gray_clear() =>nmark_all_objects() =>hase = PAUSE`,
+     * Why it is needed: the cancellation path is ordered `gray_clear() => unmark_all_objects() => phase = PAUSE`,
      * and step 3 waits only for `sp_scanning == 0` -- **`object_new` does not take part in `sp_scanning`**. So a thread that
-     * has already read `ph in PROPAGATE, ATOMIC}` but has not yet linked its object can link it into the nursery **after** `unmark_all_objects()`
+     * has already read `ph in {PROPAGATE, ATOMIC}` but has not yet linked its object can link it into the nursery **after** `unmark_all_objects()`
      * has run, and its color is "no white bit". That object then enters the idle phase with no white bit, and
-     * in the next cycle `mark_object` skips it at the `(m & WHITE_BITS) == 0 =>lready gray/black` branch,
-     * so its children are never expanded -- *missed mark =>angling pointer**.
+     * in the next cycle `mark_object` skips it at the `(m & WHITE_BITS) == 0 => already gray/black` branch,
+     * so its children are never expanded -- **missed mark => dangling pointer**.
      * Measured: under a Debug build, about a quarter of the cycles in a four-thread stress run showed
      * `[verify] idle-phase color is not the current white bit list=2 marked=0`, while `cancelled_cycles` kept growing and
      * `cycles` was always 0 -- exactly this path.
@@ -5346,7 +5346,7 @@ GCXX_NOINLINE inline void object_new_mark_window_finish(gc_state& g, gc_object* 
      * **missed mark and therefore a dangling pointer**.
      * This is exactly what `gc_verify`'s "the idle-period color is not the current white bit" check is looking for.
      *
-     * The predicate is `phase in?{PROPAGATE, ATOMIC} || aborting`:
+     * The predicate is `phase in {PROPAGATE, ATOMIC} || aborting`:
      *   * the phase is no longer the mark window => marking has finished (or never started) => nobody consumes that enqueue;
      *   * `aborting` covers the **cancel path**: it does `gray_clear()` first, then `unmark_all_objects()`, and only
      *     then sets `phase` back to PAUSE, so the window in which "the phase is still PROPAGATE but the rollback has already walked the object chain"
@@ -5585,7 +5585,7 @@ inline void make_white(gc_object* o) {
  * generation is treated as a whole as the root set and its graph is not expanded. Leaf objects (a type that needs no scanning) are dyed black directly and do not enter the gray set
  * (the gray set is an array-style worklist of capacity GCXX_GRAY_CAPACITY). Concurrency: CAS to clear the white bit, the winner links onto the gray chain. */
 /**
- * @brief Whether the mark window is still open (= `phase in PROPAGATE, ATOMIC}`).
+ * @brief Whether the mark window is still open (= `phase in {PROPAGATE, ATOMIC}`).
  * @note Used by `mark_object`'s "two-read repair": ask once again **after the store**.
  *       Reading the predicate with relaxed is deliberate -- this is an "after-the-fact confirmation", not synchronization; seeing "still open" one beat late while it is
  *       actually closed is extremely unlikely, and even then it only means "this cycle retains one more object", which is the safe direction (see the note on
@@ -5603,11 +5603,11 @@ inline bool mark_window_still_open() {
  * the mark-window epilogue has to cross `drain_mark_work` + `weak_process_after_mark`, so that gray-set entry
  * may end up with **no consumer at all** (`finish_cycle`'s `gray_clear()` silently drops it). If the object thus
  * crosses the cycle carrying "no white bit", the next cycle's `mark_object` skips it at `(m & WHITE_BITS) == 0` --
- * its children are never expanded -- *missed mark =>angling pointer**. Dropping a gray-set entry does not matter, **a missing white bit must never cross a cycle**.
+ * its children are never expanded -- **missed mark => dangling pointer**. Dropping a gray-set entry does not matter, **a missing white bit must never cross a cycle**.
  *
  * @note **Why confirm once more after the write-back**: the first re-read and the "write the white bit" can likewise be preempted, and by then
  *       sweep may already have started and **run past this object** (sweep only `make_white`s objects the cursor passes over),
- *       so nobody will ever restore its white bit again. Hence the form "confirm =>rite back =>onfirm again =>rite back again",
+ *       so nobody will ever restore its white bit again. Hence the form "confirm => write back => confirm again => write back again",
  *       which narrows the window to "it leaks only when there is no preemption". The write-back is **idempotent** (it only ORs the white bits back, it does not clear other bits).
  * @note Safe direction: this step **only retains more**. Dyeing dark inside the mark window means "marking is still in progress", and an object written back
  *       to white is not treated as marked this cycle, so the next cycle's root scan/self-scan will re-mark it normally; and the iron rule of a conservative GC is
@@ -6248,8 +6248,8 @@ inline int dyn_roots_cb(struct dl_phdr_info* info, std::size_t, void* data) {
  * @brief Append the **writable sections** (`IMAGE_SCN_MEM_WRITE`) of the image `image` as root ranges.
  * @return how many segments were actually appended this call (those skipped by deduplication do not count).
  *
- * @note This function **only parses PE; it calls no Windows enumeration API** =>ts arithmetic and bounds
- *       (taking the NT header via `e_lfanew`, locating the section table, RVA=>ointer, VirtualSize) are **platform independent**,
+ * @note This function **only parses PE; it calls no Windows enumeration API** => its arithmetic and bounds
+ *       (taking the NT header via `e_lfanew`, locating the section table, RVA=> pointer, VirtualSize) are **platform independent**,
  *       so it can be unit-tested on Linux with a synthetic PE image, without waiting for a Windows build.
  * @internal
  */
@@ -6459,7 +6459,7 @@ inline unsigned static_ranges_gather(char** r, unsigned cap) {
      *       which likewise gives precise segments for the **shared libraries**.
      * @warning **NetBSD / OpenBSD / DragonFly are currently a gap in this chain** (see the note on the
      *       `#else` branch below). Their `GCXX_PLATFORM_HAVE_LINK_H` is 0
-     *       (only Linux/FreeBSD/Android are 1), so:
+     *       (only Linux/FreeBSD/Android ~1 are 1), so:
      *         * this function's symbol branch falls to `#else` (registers nothing);
      *         * step 2's dynamic-root branch is compiled out as well (it is likewise conditioned on `GCXX_PLATFORM_HAVE_LINK_H`).
      *       => these three have **neither static roots nor dynamic roots**, so "an object referenced only by a global/static variable"
@@ -8512,14 +8512,14 @@ struct alloc_ptr<U[N]> {
         ::gcxx::detail::gc_start_impl(static_cast<void*>(&gc_stack_anchor__));  \
     } while (0)
 /* --------------------------------------------------------------------------
- * gc_refresh_roots()  -- =>e-collect the root ranges of the "static area + dynamic library data segments".
+ * gc_refresh_roots()  -- re-collect the root ranges of the "static area + dynamic library data segments".
  *
  *   dlopen("plugin.so", RTLD_NOW);   // if that library's globals hold GC pointers
  *   gc_refresh_roots();              // it must be called once, or those pointers are not roots
  *
  * After the GC starts it **collects them once automatically** (covering every shared object already loaded at the first collection), so
  * an ordinary program (libraries linked at process startup) does **not** need to call it. Only libraries pulled in by a **runtime `dlopen`**
- * need an explicit refresh  -- =>ecause repeating that collection automatically would have to happen outside `gc_mutex` (lock-order safety, see
+ * need an explicit refresh  -- because repeating that collection automatically would have to happen outside `gc_mutex` (lock-order safety, see
  * the notes on detail::scan_dyn_roots_slow), and cannot be hooked onto every `dlopen`.
  *
  * Idempotent and thread-safe: may be called at any time (including under multiple threads). The cost is one rescan of the range table.
@@ -8535,7 +8535,7 @@ inline void gc_refresh_roots() {
 #endif
 }
 /* --------------------------------------------------------------------------
- * gc<T>(args...)  -- =>llocate and construct a T on the GC heap.
+ * gc<T>(args...)  -- allocate and construct a T on the GC heap.
  *
  *      Node* n = gc<Node>(42);          // constructed with 42
  *      int*  a = gc<int[]>(1000);       // 1000 ints, value-initialized
@@ -8552,14 +8552,14 @@ inline void gc_refresh_roots() {
  * a whole array) must not exceed gcxx::detail::MAX_OBJECT_SIZE (4GiB-256).
  * ------------------------------------------------------------------------ */
 /* Helper traits for array detection. They must live in a **named** namespace: they appear in gc's return type/constraints, and gc is
- * a template with external linkage  -- =>utting them in an anonymous namespace would make every TU see a different type (ODR violation, and one instantiation per TU). */
+ * a template with external linkage  -- putting them in an anonymous namespace would make every TU see a different type (ODR violation, and one instantiation per TU). */
 namespace gcxx { namespace detail {
 template <typename T> struct gc_array_elem           { typedef T type; };
 template <typename U> struct gc_array_elem<U[]>      { typedef U type; };
 template <typename T> struct gc_is_unbounded_array               : std::false_type {};
 template <typename U> struct gc_is_unbounded_array<U[]>          : std::true_type  {};
 /* Scan class of the allocation. With ForceScan = true **everything is conservatively scanned** (the gcs semantics); the only exception is a block too small to hold one
- * complete pointer  -- =>uch a block physically cannot contain a pointer, so scanning it is wasted work. */
+ * complete pointer  -- such a block physically cannot contain a pointer, so scanning it is wasted work. */
 inline std::uint8_t alloc_type_for(std::size_t total, std::uint8_t auto_type,
                                    bool force_scan) {
     if (!force_scan) return auto_type;
@@ -8644,8 +8644,8 @@ gc_build_arr(std::size_t n) {
  *
  * @param args Arguments forwarded to the `T` constructor.
  * @return Pointer to the constructed object (the memory is provided and zeroed by the GC; construction is done by this function).
- * @note When unsure whether the type deduction is accurate, use `gcs<T>(...)` to force scanning  -- => wrong call does not merely mean "a bit slower",
- *       it means **a missed mark =>rongful reclamation =>angling pointer**.
+ * @note When unsure whether the type deduction is accurate, use `gcs<T>(...)` to force scanning  -- a wrong call does not merely mean "a bit slower",
+ *       it means **a missed mark => wrongful reclamation => dangling pointer**.
  */
 template <typename T, typename... Args>
 GCXX_ALWAYS_INLINE typename std::enable_if<
@@ -8699,7 +8699,7 @@ GCXX_ALWAYS_INLINE void* gc(std::size_t size) {
  *
  * Rationale: `gc<T>` uses compile-time type deduction to decide "to scan or not", based on
  * `is_integral` / `is_floating_point` / `is_enum` / `gc_declare_plain<T>()`; a single wrong call
- * (for example declaring a pointer-bearing struct as plain) means **a missed mark =>rongful reclamation =>angling pointer**.
+ * (for example declaring a pointer-bearing struct as plain) means **a missed mark => wrongful reclamation => dangling pointer**.
  * `gcs` lets you say explicitly "I am not sure, take the most conservative route", at the cost of scanning this memory on every mark.
  *
  * @param args Arguments forwarded to the `T` constructor.
@@ -8747,7 +8747,7 @@ GCXX_ALWAYS_INLINE void* gcs(std::size_t size) {
  *        `GC_malloc_atomic`).
  *
  * This is the library's fastest allocation path: marking **skips the whole block** (not "scan it and find no pointers", but never touching it at all).
- * These objects live in **atomic chunks** (`KIND_ATOMIC`), physically separated from objects that need scanning  -- ?no object that needs
+ * These objects live in **atomic chunks** (`KIND_ATOMIC`), physically separated from objects that need scanning  -- "no object that needs
  * scanning ever appears in an atomic chunk" is a structural property that `gc_verify()` asserts; reverse lookup (interior pointers) still works as usual, it is only that once marked
  * the object is not expanded.
  *
@@ -8772,13 +8772,13 @@ GCXX_ALWAYS_INLINE void* gca(std::size_t size) {
         size, (std::uint8_t)::gcxx::GC_TYPE_ATOMIC, false, true);
 }
 
-/* gca<T>(args...) / gca<T[]>(n)  -- =>yped atomic allocation: skip type deduction entirely and allocate directly as "atomic".
+/* gca<T>(args...) / gca<T[]>(n)  -- typed atomic allocation: skip type deduction entirely and allocate directly as "atomic".
  * Whether T contains pointers is the **caller's** responsibility (that is exactly the gca contract).
  *
  * **`enable_if` cannot be omitted**: without it this **scalar** overload is also a viable candidate for `gca<U[]>(n)`
  * (`T` can be deduced as `U[]` while the argument is exactly `n`), and it is **more specialized** than the array overload below
  * (the array overload's `enable_if` is only SFINAE in its return type), so `gca<U[]>(n)` would select this one
- * and be rejected outright inside it by `static_assert(!std::is_array<T>::value)`  -- =>ith the result that
+ * and be rejected outright inside it by `static_assert(!std::is_array<T>::value)`  -- with the result that
  * **`gca<T[]>(n)` is completely unusable** (`gc<T[]>(n)` / `gcs<T[]>(n)` work because they have the same `enable_if`).
  * Excluding arrays with the same predicate `gc_is_unbounded_array` is what makes the array form actually land on the overload below. */
 template <typename T, typename... Args>
@@ -8824,11 +8824,11 @@ gca(std::size_t n) {
  * @code
  *   std::vector<Foo*, gc_allocator<Foo*>> v;      // its element memory is managed by the GC
  * @endcode
- * @note `deallocate()` is a **no-op**  -- =>he GC reclaims the memory once the whole block is unreachable.
+ * @note `deallocate()` is a **no-op**  -- the GC reclaims the memory once the whole block is unreachable.
  * @note Same contract as `gc<T>`: only 16-byte slot alignment is guaranteed, so types with `alignof(T) > 16` are
  *       rejected (compile-time `static_assert`).
  *
- * @warning **STL containers that store `gc` pointers/handles must use this allocator**  -- =>therwise those pointers
+ * @warning **STL containers that store `gc` pointers/handles must use this allocator**  -- otherwise those pointers
  *          are **not roots** and the target objects will be reclaimed.
  *
  * Reason: the GC scans only **the memory it can see** (thread stacks, registers, the writable data segment) plus objects
@@ -8843,8 +8843,8 @@ gca(std::size_t n) {
  * ```
  *
  * **Measured evidence** (same machine, the same code with only the allocator swapped): after filling 200 `gc<int>()` and running one collection:
- *   * default allocator: survivors **200 / 7** (the vast majority reclaimed, so any later access dangles);
- *   * `gc_allocator`: survivors **209  -- 01** (correctly retained).
+ *   * default allocator: survivors **200 -> 17** (the vast majority reclaimed, so any later access dangles);
+ *   * `gc_allocator`: survivors **209 -> 201** (correctly retained).
  *
  * @note This is not a defect of this library but an **inherent contract of conservative GC**: no conservative GC can trace memory
  *       it cannot see. But it is easy enough to trip over, hence this explicit warning.
@@ -8949,7 +8949,7 @@ struct gc_stats {
     std::size_t mark_us;
     std::size_t sweep_us;
     /* ---- physical memory return (D1/D2) ---- decommits / recommits are cumulative counts; purged_chunks is the **current** number of empty blocks in
-     * the "data area decommitted" state. rss_bytes is the process's current working set (0 when unavailable)  -- =>apped_bytes is
+     * the "data area decommitted" state. rss_bytes is the process's current working set (0 when unavailable)  -- mapped_bytes is
      * the intended value, and only it can prove "the memory really went back". */
     std::size_t decommits;
     std::size_t recommits;
@@ -8961,7 +8961,7 @@ struct gc_stats {
 };
 /** @brief Take a statistics snapshot (**diagnostics/testing only**, not a stable contract).
  * @return A relaxed snapshot of the current counters; for semantics see the notes on each `gc_stats` field.
- * @note Reads only the TLS slot and **never creates a heap for the calling thread**  -- =>therwise a thread that only queries and never allocates
+ * @note Reads only the TLS slot and **never creates a heap for the calling thread**  -- otherwise a thread that only queries and never allocates
  *       would never reach a safepoint, and every later collection would wait out the full STW budget and then be cancelled.
  * @internal
  */
@@ -8997,7 +8997,7 @@ inline gc_stats gc_stat() {
     {   /* chunk_count / mapped_bytes are written by paths holding gc_mutex; each heap's pend_*_pub is a relaxed snapshot published by its owner and can be read directly. */
         ::gcxx::detail::gc_mutex_guard lk;
         /* Add back the empty chunks on the recycle stack: they are no longer on the global chain (hence not in chunk_count / mapped_bytes),
-         * but their memory is still mapped. Reporting only the on-chain part badly understates the real footprint  -- =>easured understated by 190x. */
+         * but their memory is still mapped. Reporting only the on-chain part badly understates the real footprint  -- measured understated by 190x. */
         const unsigned rec = g.recycled.load(std::memory_order_relaxed);
         s.chunk_count = g.chunk_count + (std::size_t)rec;
         s.mapped_bytes = g.mapped_bytes + (std::size_t)rec * ::gcxx::detail::CHUNK_SIZE;
@@ -9012,7 +9012,7 @@ inline gc_stats gc_stat() {
         const std::size_t pend_o = g.sweep_pend_objs_pub.load(std::memory_order_relaxed);
         s.live_bytes   = s.live_bytes   > pend_b ? s.live_bytes   - pend_b : 0;
         s.live_objects = s.live_objects > pend_o ? s.live_objects - pend_o : 0;
-        /* Reads only the TLS slot and **never calls my_heap()**  -- =>hat would create a heap for the calling thread and register it as a GC participant; if that thread never
+        /* Reads only the TLS slot and **never calls my_heap()**  -- that would create a heap for the calling thread and register it as a GC participant; if that thread never
          * allocates it would never reach a safepoint, and every later collection would wait out the full STW budget and then cancel/force-suspend. */
         ::gcxx::detail::gc_heap* self = ::gcxx::detail::heap_tls_get();
         const std::ptrdiff_t debt = self != nullptr
@@ -9035,7 +9035,7 @@ inline std::size_t gc_verify() {
  * Internal test interface (**not a public API**; fields and semantics change with the implementation)
  *
  * Design discipline (directly related to the lesson of section 46.2):
- *  * **Read-only throughout**  -- =>t changes no colours/lists/counters, and therefore **does not change the behaviour under test**.
+ *  * **Read-only throughout**  -- it changes no colours/lists/counters, and therefore **does not change the behaviour under test**.
  *    (Instrumenting a hot function is by itself enough to dominate the cost it is meant to report.)
  *  * **No allocation, no triggering of collection, no heap creation for the calling thread** (reads only the TLS slot, never calls `my_heap()`).
  *  * The two interfaces that walk lists hold `gc_mutex` (the lists are modified by other threads, see the notes on `gc_dump`);
@@ -9118,13 +9118,13 @@ struct gc_test_colors_t {
 };
 /** @brief Count the colour distribution across the three object lists (internal testing; holds `gc_mutex`).
  * @note **It does not assert when it finds "a `MARK_FREE` slot on a list" or "a colour outside the three colours"**;
- *       it only reports the counts  -- =>he assertion is left to the caller (the test case), so that the same interface serves both as a health chart under
+ *       it only reports the counts  -- the assertion is left to the caller (the test case), so that the same interface serves both as a health chart under
  *       normal load and as a criterion in **deliberately corrupted** test cases. */
 inline gc_test_colors_t gc_test_count_colors() {
     using namespace ::gcxx::detail;
     gc_test_colors_t c = {};
     gc_mutex_guard lk;
-    /* **Object lists must only be walked while idle (phase == PAUSE)**  -- =>gc_mutex` does not hold off sweeping!
+    /* **Object lists must only be walked while idle (phase == PAUSE)**  -- `gc_mutex` does not hold off sweeping!
      *
      * `sweep_some` **deliberately does not take `gc_mutex`** (by design: incremental sweeping is driven by allocation debt and the
      * mutator is never stopped). So holding the lock does not prevent it from concurrently **unlinking and `object_free`-ing
@@ -9134,7 +9134,7 @@ inline gc_test_colors_t gc_test_count_colors() {
      *   `Access violation - c0000005`,
      *   `gcxx::tests::gc_test_count_colors+0x8e`
      *     <- sampling-thread lambda
-     * crashing at the `mark_load(o)` in the walk below  -- =>eading an already-dangling object header.
+     * crashing at the `mark_load(o)` in the walk below  -- reading an already-dangling object header.
      * (**Line numbers in this file are deliberately not cited**: they drift with every change, and such self-references inevitably rot.)
      *
      * **The same contract applies to every whole-heap-walking diagnostic interface**:
@@ -9168,7 +9168,7 @@ inline gc_test_colors_t gc_test_count_colors() {
 /** @brief Walk all live objects (internal testing; holds `gc_mutex`). Returning `false` from the callback stops immediately.
  * @param fn Of the form `bool(gc_object*, int list)`; `list` = 0/1/2 corresponds to young/old/nursery.
  * @return Whether every object was visited. **When the heap is not idle (`phase != PAUSE`) it always returns `false` and never calls back even once**
- *          -- =>uring sweeping the object lists are concurrently unlinked and their slots recycled, so walking them reads dangling object headers (see
+ *          -- during sweeping the object lists are concurrently unlinked and their slots recycled, so walking them reads dangling object headers (see
  *         the `@warning` on `gc_test_count_colors` and the same passage in `gc_dump`).
  * @note `gc_object*` is an internal type: read only its `size`/`age`/`type`/`marked`,
  *       **never** modify it (that bypasses every invariant). Inside the callback do **not** call any interface that takes `gc_mutex`,
@@ -9205,10 +9205,10 @@ struct gc_test_object_info_t {
     bool          is_leaf;    /**< this type needs no scanning */
 };
 /** @brief Resolve an address to object information (internal testing; the same criteria as the marking path).
- * @note It goes through `object_find`  -- *interior pointers** (`&obj.field`, negative bias) are hit as well,
+ * @note It goes through `object_find`  -- **interior pointers** (`&obj.field`, negative bias) are hit as well,
  *       consistent with the `GCXX_ALL_INTERIOR_POINTERS` setting. **Reachability is not considered.**
  * @note No `gc_mutex` needed (a single address -> table-entry lookup plus one object-header read; in the worst case it returns a miss,
- *       which is safe by direction  -- =>he same reasoning as `gc_is_gc_pointer`). */
+ *       which is safe by direction  -- the same reasoning as `gc_is_gc_pointer`). */
 inline gc_test_object_info_t gc_test_object_of(const void* p) {
     using namespace ::gcxx::detail;
     gc_test_object_info_t r = {};
@@ -9234,7 +9234,7 @@ struct gc_test_chunks_t {
     std::size_t total_bytes;   /**< chain_bytes + recycled x 64KB */
 };
 /** @brief Take the global chunk/mapping view (internal testing). The same basis as the two `gc_stat()` fields
- *       (**including** the empty chunks on the recycle stack  -- =>mitting them understates the real footprint, measured understated by 190x once). */
+ *       (**including** the empty chunks on the recycle stack  -- omitting them understates the real footprint, measured understated by 190x once). */
 inline gc_test_chunks_t gc_test_chunk_count() {
     using namespace ::gcxx::detail;
     gc_test_chunks_t r = {};
@@ -9256,7 +9256,7 @@ inline gc_test_chunks_t gc_test_chunk_count() {
 
 namespace detail {
 /* Registration and reading of weak references / ephemerons (write side and read side). A uniform **index + table** model: a handle holds only a
- * `std::uint32_t` index, and every raw pointer lives in a GC-private malloc table (for the reason see the notes on weak_slot  -- =>andle memory
+ * `std::uint32_t` index, and every raw pointer lives in a GC-private malloc table (for the reason see the notes on weak_slot  -- handle memory
  * is conservatively scanned). Both registration and deregistration hold gc_mutex (mutually exclusive with the processing phase inside STW). */
 /**
  * @brief Resolve a handle's `(index, generation)` to its slot, or `nullptr` when the
@@ -9339,7 +9339,7 @@ inline void weak_slot_free(gc_state& g, std::uint32_t idx, std::uint32_t gen) {
     weak_slot& s = g.weak_tab[idx];
     if (!s.in_use) return;
     /* **Only a still-live entry decrements the count**: the expired one was already decremented in weak_process_after_mark, and decrementing
-     * it again here would drive weak_live to 0  -- =>nd 0 is the fast gate that "skips the whole stabilization phase" (`weak_live == 0
+     * it again here would drive weak_live to 0  -- and 0 is the fast gate that "skips the whole stabilization phase" (`weak_live == 0
      * return`), so ephemeron activation is skipped entirely, values stop being marked, and handles expire immediately (that defect surfaced reliably only on clang-cl
      * Release, see `memory/MEMORY.md` section 2.2). Invariant:
      *     weak_live == #{ slots : in_use && key != nullptr } */
@@ -9356,7 +9356,7 @@ inline void weak_slot_free(gc_state& g, std::uint32_t idx, std::uint32_t gen) {
 /**
  * @brief Allocate a weak entry (reusing the free list first, otherwise growing on demand).
  * @return The slot index; `SLOT_NONE` = failure.
- * @note Growth **moves values item by item** (atomic load/store, not a bitwise copy), and **indices are stable**  -- =>andles hold indices, not addresses, so growth is transparent to them.
+ * @note Growth **moves values item by item** (atomic load/store, not a bitwise copy), and **indices are stable**  -- handles hold indices, not addresses, so growth is transparent to them.
  * @internal
  */
 inline std::uint32_t weak_slot_alloc(gc_state& g) {
@@ -9376,7 +9376,7 @@ inline std::uint32_t weak_slot_alloc(gc_state& g) {
          * Three independent reasons; any one of them requires refusing further growth:
          *  1. `weak_slot::next` (the free list), `SLOT_NONE`, and the `idx_` stored in handles are all
          *     **32-bit**; once the slot count exceeds `UINT32_MAX`, `(std::uint32_t)g.weak_len++` will
-         *     **truncate** and the new entry gets an **aliased index**  -- =>ater deregistration/reads then operate on **a different slot**,
+         *     **truncate** and the new entry gets an **aliased index**  -- later deregistration/reads then operate on **a different slot**,
          *     a silent memory-safety problem.
          *  2. `ncap * sizeof(weak_slot)` (24 bytes per slot) **wraps around** for very large `ncap`,
          *     `malloc` successfully returns a block **far smaller** than needed, and the per-slot placement new that follows
@@ -9394,7 +9394,7 @@ inline std::uint32_t weak_slot_alloc(gc_state& g) {
         auto* nt = static_cast<weak_slot*>(std::malloc(ncap * sizeof(weak_slot)));
         if (nt == nullptr) return SLOT_NONE;
         /* The new table is built with placement new (weak_slot contains std::atomic, so raw memory cannot be written directly); the old table **has its values moved item by item**
-         * rather than memcpy  -- =>hat is moved is atomic load/store, not a bitwise copy. **Indices are stable** (handles hold indices,
+         * rather than memcpy  -- what is moved is atomic load/store, not a bitwise copy. **Indices are stable** (handles hold indices,
          * not addresses), so growth is transparent to handles. */
         for (std::size_t i = 0; i < ncap; ++i) {
             auto* s = ::new (static_cast<void*>(&nt[i])) weak_slot;
@@ -9469,12 +9469,12 @@ inline void weak_set(std::uint32_t& idx, std::uint32_t& gen, void* target, void*
      * Handles live on the stack/in the static area, and their **destructor** running after dispose is a known shape (`weak_slot_free` and
      * `weak_peek` both guard against it), but **re-assignment** reaches this point too:
      * `gc_dispose()` sets `weak_tab` to nullptr and zeroes `weak_len`, while the library documentation says it "may be used
-     * afterwards", so `w = p;` / `w.reset(p)` / `e.set(k, v)` would index an empty table with an old index =>ull-pointer
+     * afterwards", so `w = p;` / `w.reset(p)` / `e.set(k, v)` would index an empty table with an old index => null-pointer
      * dereference. The **same** criteria are used here as in those two places.
      *
      * The criteria **must** include a generation comparison. Testing only `idx < weak_len` would miss the worst case:
      *    the table **has already grown again** after dispose, so a stale index falls in the legal range while pointing at
-     *    **another handle's slot** =>ilent cross-talk (overwriting someone else's entry). See `weak_generation`.
+     *    **another handle's slot** => silent cross-talk (overwriting someone else's entry). See `weak_generation`.
      * The single validation predicate lives in `weak_slot_lookup` (shared with the read and deregister paths). */
     if (weak_slot_lookup(g, idx, gen) == nullptr) idx = SLOT_NONE;
     if (idx == SLOT_NONE) {
@@ -9495,7 +9495,7 @@ inline void weak_set(std::uint32_t& idx, std::uint32_t& gen, void* target, void*
     s.in_use = 1;
     s.kind = kind;
     s.activated = 0;
-    /* Order: write value first, then key  -- =>he read side treats a non-null key as the criterion for "this entry is valid", so key must be published last with release. */
+    /* Order: write value first, then key  -- the read side treats a non-null key as the criterion for "this entry is valid", so key must be published last with release. */
     s.value.store(value != nullptr
                       ? reinterpret_cast<gc_object*>(
                             static_cast<char*>(value) - (std::ptrdiff_t)PAYLOAD_OFF)
@@ -9521,13 +9521,13 @@ inline void weak_clear(std::uint32_t& idx, std::uint32_t& gen) {
     idx = SLOT_NONE;
     gen = 0;
 }
-/* Read side: the payload pointer in the slot. It can be read **lock-free**  -- =>rites happen only inside STW (all mutators stopped) or under gc_mutex,
+/* Read side: the payload pointer in the slot. It can be read **lock-free**  -- writes happen only inside STW (all mutators stopped) or under gc_mutex,
  * and this uses an acquire read, which is well defined even when concurrent with a write on gc_step's non-STW fallback path. */
 /**
  * @brief Read the payload pointer of an entry (a weak reference reads the target; an ephemeron may read the key or the value).
  * @return The payload; `nullptr` if it is no longer valid.
  * @note Can be read **lock-free**: writes happen only inside STW or under gc_mutex, and an acquire read is well defined even when concurrent with a write.
- * @note A generation mismatch (a stale handle across `gc_dispose()`) always returns `nullptr`  -- =>ee `weak_generation`.
+ * @note A generation mismatch (a stale handle across `gc_dispose()`) always returns `nullptr`  -- see `weak_generation`.
  * @internal
  */
 inline void* weak_peek(std::uint32_t idx, std::uint32_t gen, bool want_value) {
@@ -9535,7 +9535,7 @@ inline void* weak_peek(std::uint32_t idx, std::uint32_t gen, bool want_value) {
     const weak_slot* sp = weak_slot_lookup(g, idx, gen);
     if (sp == nullptr) return nullptr;
     const weak_slot& s = *sp;
-    /* key is the sole criterion for whether this entry is valid: a non-null key =>he target is alive =>alue is valid (a live key means the value was marked this cycle). */
+    /* key is the sole criterion for whether this entry is valid: a non-null key => the target is alive => value is valid (a live key means the value was marked this cycle). */
     const gc_object* k = s.key.load(std::memory_order_acquire);
     if (k == nullptr) return nullptr;
     const gc_object* p = want_value ? s.value.load(std::memory_order_acquire) : k;
@@ -9561,7 +9561,7 @@ inline void* weak_peek(std::uint32_t idx, std::uint32_t gen, bool want_value) {
  * Three rules:
  *  1. **Read-only**: no allocation, no changes to objects/chunks/lists; no collection triggered, no pacing changed.
  *  2. **Never create a heap for the calling thread**: always go through `heap_tls_get()` (reads only the TLS slot), never call
- *     `my_heap()`  -- =>therwise a thread that only queries and never allocates **never reaches a safepoint**,
+ *     `my_heap()`  -- otherwise a thread that only queries and never allocates **never reaches a safepoint**,
  *     and every later collection would wait out the full STW budget and then cancel/force-suspend.
  *  3. **Must hold `gc_mutex`** (public read-only does **not** mean lock-free, see the notes on `gc_dump`).
  *
@@ -9582,13 +9582,13 @@ inline void* weak_peek(std::uint32_t idx, std::uint32_t gen, bool want_value) {
  *
  * @warning **Why it needs `gc_mutex` ("read-only" does not mean "lock-free")**:
  *   This function walks the **heap chain + each heap's young/old/nursery object lists**, and these are
- *   structures that **other threads modify**  -- =>ther threads push new objects at the head (`object_new`), and the collector
+ *   structures that **other threads modify**  -- other threads push new objects at the head (`object_new`), and the collector
  *   unlinks/promotes/frees heap structs (`reap_dead_heaps` `free()`s the heaps of exited threads).
  *   The consequence of not locking is **not "reading slightly stale data"** but:
- *     * following a `next`/`hnext` that is being rewritten into a **freed heap struct** =>egfault;
- *     * `chunk_of()` returns nullptr for a chunk being unlinked from the global chain by `chunk_retire` =>y histogram
+ *     * following a `next`/`hnext` that is being rewritten into a **freed heap struct** => segfault;
+ *     * `chunk_of()` returns nullptr for a chunk being unlinked from the global chain by `chunk_retire` => my histogram
  *       records it as the "unknown bucket" (data distortion);
- *     * the list is head-inserted into mid-walk =>he same object is counted twice / missed in one dump.
+ *     * the list is head-inserted into mid-walk => the same object is counted twice / missed in one dump.
  *
  * @warning **But `gc_mutex` solves only half of it**: `sweep_some` **deliberately does not take `gc_mutex`**
  *   (it takes the lock only once when reading the heap chain head); during sweeping it unlinks and `object_free`s slots,
@@ -9601,7 +9601,7 @@ inline void* weak_peek(std::uint32_t idx, std::uint32_t gen, bool want_value) {
  * @note It **does not judge reachability**: everything listed is simply "the objects currently on the young/old/nursery lists".
  *       To ask "will this object be reclaimed", use `gc_weak`.
  * @note The implementation uses only **two small on-stack structures** (a 512-bucket histogram + a one-bucket temporary value),
- *       adding no public types  -- =>hat is part of the "lightweight" constraint.
+ *       adding no public types  -- that is part of the "lightweight" constraint.
  */
 inline std::size_t gc_dump(std::FILE* out = stdout) {
     /* Both using directives are required: gc_object is in gcxx, while gc_heap/gc_chunk/
@@ -9790,7 +9790,7 @@ inline std::size_t gc_dump(std::FILE* out = stdout) {
  *       To ask "will this object be reclaimed", use `gc_weak`.
  * @note No `gc_mutex` needed (unlike `gc_dump`): it performs **one** address -> table-entry
  *       lookup + one object-header read, walking no lists; in the worst case it reads "a chunk currently being unlinked from the global chain"
- *       and returns nullptr  -- =>or the question "is this a GC object", that is **safe by direction**
+ *       and returns nullptr  -- for the question "is this a GC object", that is **safe by direction**
  *       (better to say no; non-GC memory is never called a GC object).
  */
 inline void* gc_is_gc_pointer(const void* p) {
@@ -9801,9 +9801,9 @@ inline void* gc_is_gc_pointer(const void* p) {
  * @brief Force one **complete** major collection (running the incremental sweep to completion in one go).
  * @return `true` = this cycle really reclaimed; `false` = this call **reclaimed no memory at all**, for **two** reasons
  *         (the caller cannot tell them apart from the return value; neither means an error):
- *         1. the cycle was **cancelled**  -- =>ome thread failed to reach a safepoint within `STW_TIMEOUT_MS`. If the mutator cannot be stopped
+ *         1. the cycle was **cancelled**  -- some thread failed to reach a safepoint within `STW_TIMEOUT_MS`. If the mutator cannot be stopped
  *            it cannot be marked safely, so the cancelled cycle reclaims nothing (no dangling pointers are produced, the memory is simply not saved);
- *         2. **another thread is already collecting** (`collect_depth` acquisition failed)  -- =>his call returns immediately,
+ *         2. **another thread is already collecting** (`collect_depth` acquisition failed)  -- this call returns immediately,
  *            and the owner finishes that cycle.
  * @note Normal use **does not need** it: collection is driven automatically by allocation debt (see the design points at the head of the file).
  *       Its purpose is "I know there is a big pile of garbage right now and I want it collected immediately".
@@ -9823,7 +9823,7 @@ inline bool gc_collect() {
  * @endcode
  *
  * @warning A weak reference **does not count as a reference**. `gc_weak<int> w = gc<int>(10);` is well-formed, but apart from this weak
- *          reference the object has no references at all, so the first collection reclaims it and `w` expires at once  -- =>o keep it alive there must be
+ *          reference the object has no references at all, so the first collection reclaims it and `w` expires at once  -- to keep it alive there must be
  *          **another** reachable reference (usually a strong pointer held by the caller).
  * @note Expiry is decided **when marking ends, before sweeping starts**, and does not change between then and the next cycle.
  * @note **Dereferencing an expired handle is undefined behaviour** (the same as dereferencing a `std::weak_ptr` after `lock()` returned
@@ -9831,7 +9831,7 @@ inline bool gc_collect() {
  * @note User code is never called at any point (this library's "the GC never calls destructors" contract).
  * Uses: caches, observer tables, object-graph deduplication, "just need to know whether the object is still there"; when the value points back at the key, use `gc_ephemeron`.
  * Implementation note: the handle stores **only an index** (plus the **generation** of the table it belongs to, see `weak_generation`),
- * and the raw pointers live in a GC-private malloc table  -- =>his is not memory saving, it is a correctness precondition (see the notes on weak_slot).
+ * and the raw pointers live in a GC-private malloc table  -- this is not memory saving, it is a correctness precondition (see the notes on weak_slot).
  * Copy = register another entry; move = transfer the entry; destruction = deregister. */
 template <class T>
 class gc_weak {
@@ -9879,7 +9879,7 @@ public:
     }
     void reset(T* p) { assign(p); }
     /* For diagnostics: the index of this entry in the GC-private table (not a pointer, does not constitute a root).
-     * @note After a `gc_dispose()` it is no longer valid, and `get()` returns nullptr  -- =>sing
+     * @note After a `gc_dispose()` it is no longer valid, and `get()` returns nullptr  -- using
      *       `index()` to test liveness is **wrong** (see `weak_generation`). */
     unsigned index() const noexcept { return (unsigned)idx_; }
 
@@ -9908,14 +9908,14 @@ private:
  * @endcode
  *
  * @note The difference from "weak key + strong value" (the sole reason ephemerons exist): an ordinary weak reference weakens only the **key**,
- *       while the value is an ordinary strong reference  -- =>hen the value points back at the key, the value keeps the key marked, so the key never dies and the weak reference never expires
+ *       while the value is an ordinary strong reference  -- when the value points back at the key, the value keeps the key marked, so the key never dies and the weak reference never expires
  *       (the classic leak). An ephemeron folds the value into the same decision: **when the key is unreachable the value does not take part in marking at all**,
  *       so nothing the value points to (including the key) is retained, and the two are reclaimed together.
  * @note Semantic boundaries: `set(nullptr, v)` is equivalent to `reset()`; when the key is reachable the value is **certainly** reachable (a non-null `get()`
  *       means the value's memory is valid, so no further liveness test is needed).
  * @note As with `gc_weak`, dereferencing after expiry is UB, and user code is **never** called.
  * @note Cost: after marking converges each cycle the table is scanned once for activation (see `ephemeron_activate_all`); entries are few to begin with,
- *       so this is an "acceptable cost for a special-purpose feature"  -- =>o **not** use it as a general WeakHashMap. */
+ *       so this is an "acceptable cost for a special-purpose feature"  -- do **not** use it as a general WeakHashMap. */
 template <class K, class V>
 class gc_ephemeron {
 public:
@@ -10061,17 +10061,17 @@ inline void dispose_all() {
     }
 
     /* Each thread's heap struct (pointers left behind in other threads' TLS slots are the caller's responsibility to stop using).
-     * **This thread's TLS/FLS slots must be cleared first**  -- =>therwise:
+     * **This thread's TLS/FLS slots must be cleared first**  -- otherwise:
      *   * the next `gc()` uses that freed pointer directly on `my_heap()`'s fast path
      *     (measured: the first allocation after dispose is a segfault);
      *   * **at process exit** the exit callback (Windows FLS callbacks / POSIX key destructors)
-     *     still receives that already-`free`d heap and dereferences it  -- =>easured on Windows:
+     *     still receives that already-`free`d heap and dereferences it  -- measured on Windows:
      *     after `gc_dispose()`, **allocating nothing more and just exiting is an ACCESS_VIOLATION**
      *     (minimal reproducer
      *     `probes/min_dispose_verify_probe.cpp` modes 0/3).
      * So `heap_tls_clear_all()` must be used here (**clearing both TlsSetValue and FLS**),
-     * not just `heap_tls_set(nullptr)`  -- =>hat clears only the former.
-     * If other threads keep using gcxx after dispose, the stale pointers in their slots are just as dangerous  -- ?    * that is exactly the part covered by the "the caller guarantees no other users" constraint. */
+     * not just `heap_tls_set(nullptr)`  -- that clears only the former.
+     * If other threads keep using gcxx after dispose, the stale pointers in their slots are just as dangerous  --      * that is exactly the part covered by the "the caller guarantees no other users" constraint. */
     heap_tls_clear_all();
     gc_heap* h = g.heaps.load(std::memory_order_relaxed);
     while (h != nullptr) {
@@ -10197,9 +10197,9 @@ inline void gc_dispose() {
 }
 /* --------------------------------------------------------------------------
  * Auto-initialization: every translation unit that includes this header registers a static constructor that calls ensure_init() during CRT startup
- * (idempotent)  -- =>sers do **not** need to call gc_init() explicitly. Correctness basis: the stack-scan upper bound comes from the TEB's StackBase (the thread's
+ * (idempotent)  -- users do **not** need to call gc_init() explicitly. Correctness basis: the stack-scan upper bound comes from the TEB's StackBase (the thread's
  * real stack top) and is independent of initialization timing, so it is already correct during the static initialization phase before main; even if a user's static constructor runs earlier than
- * this instance (cross-TU order is not guaranteed), ensure_init() on the allocation path also initializes on demand  -- =>c is safe at any moment.
+ * this instance (cross-TU order is not guaranteed), ensure_init() on the allocation path also initializes on demand  -- gc is safe at any moment.
  * The gc_init() macro is kept: calling it explicitly is harmless (idempotent).
  * ------------------------------------------------------------------------ */
 namespace gcxx { namespace detail {
@@ -10218,7 +10218,7 @@ static const gc_auto_init gc_auto_init_inst{};
 } /* namespace detail */
 } /* namespace gcxx */
 /* Take back the preprocessor macros that this header **defined itself** and that affect user code.
- * undef only when it is "genuinely the one we defined"  -- =>f the user had already defined it (or wants to keep using it),
+ * undef only when it is "genuinely the one we defined"  -- if the user had already defined it (or wants to keep using it),
  * leaving it alone is mandatory: `#undef`-ing someone else's macro directly changes the behaviour of their later includes. */
 #if defined(GCXX_DEFINED_NOMINMAX)
 #  undef NOMINMAX
